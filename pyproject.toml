@@ -1,5 +1,5 @@
 [project]
-name = "lut-convert"
+name = "flog2-to-slog3"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

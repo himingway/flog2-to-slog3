@@ -258,13 +258,13 @@ def process_lut_directory(input_dir: str,
 # ---------------------------------------------------------
 # 4. CLI 命令行接口
 # ---------------------------------------------------------
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="富士官方 F-Log2 LUT 转换为索尼 S-Log3 专业工具")
-    
+
     # 必填参数：输入路径 (可以通过命令行传递，或使用默认值)
     parser.add_argument("-i", "--input", type=str, default="./Fuji_Official_LUTs",
                         help="包含富士官方 LUT 的根目录路径 (默认: ./Fuji_Official_LUTs)")
-    
+
     parser.add_argument(
         "--input-colourspace",
         type=str,
@@ -295,3 +295,7 @@ if __name__ == "__main__":
         output_grid_size=args.output_grid_size,
         fit_iterations=args.fit_iterations,
     )
+
+
+if __name__ == "__main__":
+    main()
