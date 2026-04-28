@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv
+
+# Local Python version managers
+.python-version
+
+# uv package manager
+.uv/
+uv.lock
+
+# Generated LUT outputs
+Sony_SLog3_Converted_*/
