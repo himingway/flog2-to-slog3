@@ -7,66 +7,46 @@ Convert Fujifilm official F-Log2 film simulation 3D LUTs to work natively with S
 ## Features
 
 - **Mathematical Precision** - Pure function composition, no empirical exposure, black level, or RGB gain corrections
-- **Tetrahedral Interpolation** - Industry-standard algorithm that eliminates cross-coupling artifacts of trilinear interpolation
+- **Tetrahedral Interpolation** - Industry-standard algorithm with true affine invariance
 - **No Dark Clamping** - Preserves legitimate negative values from gamut conversion, preventing hue shifts in shadows
 - **High Performance** - Matrix operations precomputed once, fast batch processing
 - **Grid Preservation** - Auto-detects 33/65 grid LUTs and maintains original resolution
 
 ## Mathematical Model
 
-The conversion uses rigorous function composition:
+The converted LUT is defined by strict function composition:
 
-1. **Decode** input S-Log3 code values to scene-linear light
-2. **Gamut Mapping** from S-Gamut3(.Cine) to F-Gamut in linear domain
-3. **Re-encode** to F-Log2 coordinates
-4. **Sample** the original Fujifilm LUT at these coordinates using tetrahedral interpolation
+```
+LUT_SLog3(x) = LUT_FLog2( φ(x) )
+φ(x) = FLog2_encode( M_Bradford · SLog3_decode(x) )
+```
+
+### Pipeline
+
+1. **S-Log3 Decode** — Sony's piecewise log-to-linear function recovers scene-linear light from code values
+2. **Gamut Mapping** — Linear 3×3 matrix with Bradford chromatic adaptation: S-Gamut3(.Cine) → F-Gamut
+3. **F-Log2 Encode** — Fuji's piecewise linear-to-log function maps to F-Log2 code value space (negative linear values preserved, not clamped)
+4. **Tetrahedral Interpolation** — Sample the original Fujifilm LUT at the mapped coordinates
 
 This means the converted LUT corresponds strictly to the original Fujifilm LUT at the continuous function level.
 
-## Why Tetrahedral Interpolation
-
-### The Problem with Trilinear Interpolation
-
-Trilinear interpolation factors into three sequential 1D linear interpolations:
-
-```
-f(x,y,z) = Σ (8 corner weights) × f_corner
-```
-
-The weight product `x·y·z` introduces a cubic **cross-coupling term** (∂³f/∂x∂y∂z ≠ 0) that has no physical basis in color transforms. For the gamut mapping step — which is a **linear 3×3 matrix** — trilinear interpolation is an approximation, not an exact reconstruction.
-
-### Why Tetrahedral is Better
+### Tetrahedral Interpolation
 
 Each voxel is subdivided into 6 tetrahedra. Within each tetrahedron, interpolation uses 4 vertices with barycentric coordinates:
 
 ```
-f(x,y,z) = a + b·x + c·y + d·z    (true linear, no cross terms)
+f(x,y,z) = a + b·x + c·y + d·z    (affine, no cross terms)
 ```
 
-**Key mathematical properties:**
+The gamut mapping step is an affine function G(x) = Mx + b. For any affine function, tetrahedral interpolation is an **exact** reconstruction: the 4-point affine interpolation is uniquely determined by its values at the 4 vertices, so the interpolation matches the underlying function perfectly. The gamut mapping introduces **zero** additional interpolation error regardless of grid resolution.
 
-1. **Affine invariance**: For the linear gamut transform (M·x + b), tetrahedral interpolation is **exact** — it reproduces affine functions perfectly, while trilinear introduces cross-term errors
-2. **No artificial coupling**: ∂³f/∂x∂y∂z = 0 within each tetrahedron — the mixed partial derivative that plagues trilinear interpolation is eliminated
-3. **Better locality**: Each sample point is influenced by only 4 vertices (not 8), reducing over-smoothing of color transitions
+Other properties:
+- ∂³f/∂x∂y∂z = 0 within each tetrahedron — no spurious cross-channel contamination
+- Each sample is influenced by only 4 vertices (not 8), preserving color transition sharpness
 
-### Quantitative Proof
+### Negative Value Preservation
 
-Benchmarked against 129³ ground truth on `FLog2_to_ETERNA_33grid`:
-
-| Metric | Trilinear + Cell-Center Fitting | Tetrahedral (New) | Improvement |
-|--------|-------------------------------|-------------------|-------------|
-| **RMSE** | 0.02852 (29.18 / 10-bit) | 0.00912 (9.33 / 10-bit) | **68.0%** |
-| **Mean Abs Error** | 0.01232 | 0.00154 | **87.5%** |
-| **95th Percentile** | 0.07057 | 0.00475 | **93.3%** |
-| **99th Percentile** | 0.11552 | 0.02671 | **76.9%** |
-| **Shadow RMSE** (<0.1) | 0.03057 (31.27 / 10-bit) | 0.00679 (6.95 / 10-bit) | **77.8%** |
-
-The improvement comes from two independent factors:
-
-- **Removing the 1e-8 clamp** on linear values: preserves legitimate negative values from gamut conversion, dramatically improving shadow accuracy (+77.8% in dark regions)
-- **Tetrahedral interpolation**: eliminates cross-coupling artifacts, reducing RMSE by ~17.6% even when both methods use unclamped coordinates
-
-Run the benchmark yourself: `uv run python benchmark_interpolation.py`
+Gamut conversion can produce negative linear values for out-of-gamut colors. F-Log2's encoding has a valid linear extension segment below zero that handles these naturally. Clamping to zero would introduce a gradient discontinuity, causing hue shifts in shadow regions.
 
 ## Quick Start
 
@@ -138,5 +118,5 @@ uv run python fuji_to_sony_lut.py \
 ## Quality Strategy
 
 - **Default grid**: `auto` preserves original 33/65 resolution
-- **Tetrahedral interpolation**: industry-standard algorithm with proven 68% RMSE improvement over trilinear+fitting
+- **Tetrahedral interpolation**: industry-standard algorithm with proven accuracy
 - **For maximum quality**: Upgrade to 65 or 129 grid for finer sampling
