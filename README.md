@@ -11,6 +11,7 @@ Convert Fujifilm official F-Log2 film simulation 3D LUTs to work natively with S
 - **No Dark Clamping** - Preserves legitimate negative values from gamut conversion, preventing hue shifts in shadows
 - **High Performance** - Matrix operations precomputed once, fast batch processing
 - **Grid Preservation** - Auto-detects 33/65 grid LUTs and maintains original resolution
+- **DaVinci Resolve Ready** - Writes standard Iridas `.cube` files readable by Resolve
 
 ## Mathematical Model
 
@@ -92,6 +93,10 @@ uv run python fuji_to_sony_lut.py \
 
 The script scans for `.cube` files and only processes LUTs matching `FLog2_to_*`. Other types like `F-Log` and `F-Log2C` are skipped.
 
+The generated files use the standard `TITLE` and `LUT_3D_SIZE` headers and can be
+copied directly into DaVinci Resolve's LUT folder, followed by a LUT refresh.
+The selected Sony input gamut is recorded in the file comments.
+
 Output directory convention:
 
 ```text
@@ -120,3 +125,7 @@ uv run python fuji_to_sony_lut.py \
 - **Default grid**: `auto` preserves original 33/65 resolution
 - **Tetrahedral interpolation**: industry-standard algorithm with proven accuracy
 - **For maximum quality**: Upgrade to 65 or 129 grid for finer sampling
+
+When one output grid is explicitly selected for a directory containing multiple
+source resolutions, converted files from a different source grid are placed in a
+`from33Grid` or `from65Grid` subdirectory so no LUT is overwritten.

@@ -41,7 +41,13 @@ def map_slog3_samples_to_flog2(
 
     # 不截断负值：F-Log2 编码底层在暗部有合法的线性延拓段，
     # 可以妥善处理色域转换中出现的微小负值。强行截断会导致色相严重偏转。
-    flog2_coords = colour.models.log_encoding(linear_flog2, 'F-Log2')
+    # ``colour`` evaluates both branches of F-Log2's piecewise function via
+    # ``np.where``.  The logarithmic branch is undefined for some negative
+    # out-of-gamut values even though those samples correctly use the linear
+    # branch.  Suppress that expected intermediate warning without changing
+    # the returned values.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        flog2_coords = colour.models.log_encoding(linear_flog2, 'F-Log2')
 
     # 获取原始 LUT 域范围
     domain_min = np.asarray(domain[0], dtype=float)
@@ -82,6 +88,33 @@ def rewrite_grid_marker(path: Path, grid_size: int) -> Path:
     rewritten_parts = [f"{grid_size}Grid" if part.endswith("Grid") else part for part in path.parts]
     return Path(*rewritten_parts)
 
+
+def output_path_for(
+    output_root: Path,
+    rel_path: Path,
+    cube_name: str,
+    source_grid_size: int,
+    output_grid_size: int,
+) -> Path:
+    """Build a unique, Resolve-friendly output path.
+
+    When a whole Fuji tree is converted to one explicit output size, 33-grid
+    and 65-grid source LUTs otherwise have identical output names and one
+    silently overwrites the other.  Keep the source grid as a directory only
+    in that case; the resulting files remain ordinary .cube LUTs.
+    """
+    output_rel_path = rewrite_grid_marker(rel_path, output_grid_size)
+    if source_grid_size != output_grid_size:
+        output_rel_path = (
+            Path(f"from{source_grid_size}Grid") / output_rel_path
+        )
+    output_path = output_root / output_rel_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    new_name = cube_name.replace("FLog2", "SLog3").replace(
+        f"_{source_grid_size}grid_", f"_{output_grid_size}grid_"
+    )
+    return output_path.with_name(new_name)
+
 # ---------------------------------------------------------
 # 3. 业务处理主流程
 # ---------------------------------------------------------
@@ -94,7 +127,7 @@ def process_lut_directory(input_dir: str,
     root_dir = Path(input_dir).resolve()
     if not root_dir.exists() or not root_dir.is_dir():
         logger.error(f"输入路径无效或不存在: {root_dir}")
-        return
+        return {"success": 0, "skipped": 0, "failed": 1}
 
     output_root = root_dir.parent / f"Sony_SLog3_Converted_{root_dir.name}"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -115,14 +148,14 @@ def process_lut_directory(input_dir: str,
 
     for cube_path in all_cubes:
         rel_path = cube_path.relative_to(root_dir)
-        cube_name_posix = cube_path.as_posix()
         cube_name = cube_path.name
+        rel_parts = set(rel_path.parts)
 
         # 过滤机制：只处理 F-Log2
-        if "F-Log/" in cube_name_posix or "FLog_to" in cube_name:
+        if "F-Log" in rel_parts or "FLog_to" in cube_name:
             stats["skipped"] += 1
             continue
-        if "F-Log2C" in cube_name_posix or "FLog2C_to" in cube_name:
+        if "F-Log2C" in rel_parts or "FLog2C_to" in cube_name:
             stats["skipped"] += 1
             continue
         if "FLog2_to" not in cube_name:
@@ -137,12 +170,15 @@ def process_lut_directory(input_dir: str,
             domain = np.asarray(orig_lut.domain, dtype=float)
             cache_key = (grid_size, tuple(domain.reshape(-1)))
 
-            # 构建输出路径
-            output_rel_path = rewrite_grid_marker(rel_path, grid_size)
-            out_file_path = output_root / output_rel_path
-            out_file_path.parent.mkdir(parents=True, exist_ok=True)
-            new_name = cube_name.replace("FLog2", "SLog3").replace(f"_{source_grid_size}grid_", f"_{grid_size}grid_")
-            final_out_path = out_file_path.with_name(new_name)
+            # 构建唯一输出路径；文件本身是标准 Resolve 可读的 .cube。
+            final_out_path = output_path_for(
+                output_root,
+                rel_path,
+                cube_name,
+                source_grid_size,
+                grid_size,
+            )
+            new_name = final_out_path.name
 
             # 2. 从缓存中获取映射坐标
             if cache_key not in mapping_cache:
@@ -160,7 +196,12 @@ def process_lut_directory(input_dir: str,
             new_lut = colour.LUT3D(
                 table=new_table.reshape((grid_size, grid_size, grid_size, 3)),
                 name=f"Sony_{new_name.replace('.cube', '')}",
-                domain=np.array([[0, 0, 0], [1, 1, 1]])
+                domain=np.array([[0, 0, 0], [1, 1, 1]]),
+                comments=[
+                    "Input: Sony S-Log3 / " + input_colourspace,
+                    "Output: Fujifilm F-Log2 / F-Gamut LUT converted for DaVinci Resolve",
+                    "Interpolation: tetrahedral",
+                ],
             )
 
             # 4. 写入磁盘
@@ -178,6 +219,7 @@ def process_lut_directory(input_dir: str,
     logger.info(f"统计: 成功 {stats['success']} | 跳过 {stats['skipped']} | 失败 {stats['failed']}")
     logger.info(f"导出路径: {output_root}")
     logger.info("=" * 60)
+    return stats
 
 
 # ---------------------------------------------------------
@@ -197,11 +239,13 @@ def main():
 
     args = parser.parse_args()
 
-    process_lut_directory(
+    stats = process_lut_directory(
         input_dir=args.input,
         input_colourspace=args.input_colourspace,
         output_grid_size=args.output_grid_size,
     )
+    if stats["failed"]:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     main()
