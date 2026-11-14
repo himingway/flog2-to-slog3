@@ -12,6 +12,7 @@ from colour.algebra import table_interpolation_tetrahedral
 import numpy as np
 
 import build_fuji_style
+import fuji_to_sony_lut
 import lut_to_acr as m
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -186,6 +187,17 @@ class TestLuminancePreservationAndColorMath(unittest.TestCase):
             _, t_srgb, _, _, _ = m.read_cube(p_srgb)
             _, t_24, _, _, _ = m.read_cube(p_24)
             self.assertGreater(np.abs(t_srgb - t_24).max(), 1e-3)
+
+    def test_flog2_to_slog3_mapping_neutral_and_gamut(self):
+        slog18 = m.slog3_encode(0.18)
+        flog18 = float(colour.models.log_encoding(0.18, "F-Log2"))
+        domain = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        mapped = fuji_to_sony_lut.map_slog3_samples_to_flog2(
+            np.array([[slog18, slog18, slog18]]),
+            "S-Gamut3.Cine",
+            domain,
+        )
+        np.testing.assert_allclose(mapped[0], flog18, atol=1e-6)
 
 
 class TestGeneratedStyleOutputs(unittest.TestCase):

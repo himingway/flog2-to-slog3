@@ -120,7 +120,8 @@ def output_path_for(
 # ---------------------------------------------------------
 def process_lut_directory(input_dir: str,
                           input_colourspace: str = 'S-Gamut3.Cine',
-                          output_grid_size: int | None = None):
+                          output_grid_size: int | None = None,
+                          output_dir: str | None = None):
     """
     遍历目录并执行 LUT 转换的主函数。
     """
@@ -129,7 +130,11 @@ def process_lut_directory(input_dir: str,
         logger.error(f"输入路径无效或不存在: {root_dir}")
         return {"success": 0, "skipped": 0, "failed": 1}
 
-    output_root = root_dir.parent / f"Sony_SLog3_Converted_{root_dir.name}"
+    output_root = (
+        Path(output_dir).resolve()
+        if output_dir
+        else Path("output") / f"Sony_SLog3_Converted_{root_dir.name}"
+    )
     output_root.mkdir(parents=True, exist_ok=True)
 
     logger.info("=" * 60)
@@ -228,8 +233,10 @@ def process_lut_directory(input_dir: str,
 def main():
     parser = argparse.ArgumentParser(description="富士官方 F-Log2 LUT 转换为索尼 S-Log3 专业工具")
 
-    parser.add_argument("-i", "--input", type=str, default="./Fuji_Official_LUTs",
-                        help="包含富士官方 LUT 的根目录路径 (默认: ./Fuji_Official_LUTs)")
+    parser.add_argument("-i", "--input", type=str, default="./sources/fuji_official",
+                        help="包含富士官方 LUT 的根目录路径 (默认: ./sources/fuji_official)")
+    parser.add_argument("-o", "--output", type=str, default=None,
+                        help="输出目录路径 (默认: output/Sony_SLog3_Converted_<输入目录名>)")
     parser.add_argument("--input-colourspace", type=str, default="S-Gamut3.Cine",
                         choices=("S-Gamut3.Cine", "S-Gamut3"),
                         help="Sony S-Log3 素材配套的输入色域 (默认: S-Gamut3.Cine)")
@@ -243,6 +250,7 @@ def main():
         input_dir=args.input,
         input_colourspace=args.input_colourspace,
         output_grid_size=args.output_grid_size,
+        output_dir=args.output,
     )
     if stats["failed"]:
         raise SystemExit(1)

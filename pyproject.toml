@@ -1,7 +1,7 @@
 [project]
 name = "flog2-to-slog3"
 version = "0.1.0"
-description = "Convert cinema Log 3D LUTs (S-Log3 / F-Log2) into luminance-preserving Style LUTs for Adobe Camera Raw"
+description = "Convert F-Log2 3D LUTs to Sony S-Log3/S-Gamut3.Cine (video) and luminance-preserving Style LUTs for Adobe Camera Raw (photo)"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
