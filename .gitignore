@@ -19,5 +19,10 @@ wheels/
 .uv/
 uv.lock
 
+# Large local source data (original LUTs; 官方 Fuji 包仍由 git 跟踪)
+sources/sony_luts/
+sources/unused_wdr_pre_luts/
+
 # Generated LUT outputs
+output/
 Sony_SLog3_Converted_*/
