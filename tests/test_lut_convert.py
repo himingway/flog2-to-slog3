@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""回归与边界测试：四面体插值、保亮度色域收缩、S-Log3/矩阵及最终 21 个输出 LUT。"""
+"""回归与边界测试：四面体插值、保亮度色域收缩、S-Log3/LogC/F-Log2 转换及输出 LUT。"""
 
 import glob
 import os
@@ -11,6 +11,8 @@ import colour
 from colour.algebra import table_interpolation_tetrahedral
 import numpy as np
 
+import build_arri_style
+import build_film_style
 import build_fuji_style
 import fuji_to_sony_lut
 import lut_to_acr as m
@@ -108,6 +110,19 @@ class TestTetrahedralAndCubeIO(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_read_cube_parses_lut_3d_input_range(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".cube", delete=False) as tf:
+            tf.write("LUT_3D_SIZE 2\nLUT_3D_INPUT_RANGE 0.064 0.94\n")
+            for _ in range(8):
+                tf.write("0.0 0.0 0.0\n")
+            path = tf.name
+        try:
+            _, _, dmin, dmax, _ = m.read_cube(path)
+            np.testing.assert_allclose(dmin, 0.064, atol=1e-12)
+            np.testing.assert_allclose(dmax, 0.94, atol=1e-12)
+        finally:
+            os.remove(path)
+
 
 class TestLuminancePreservationAndColorMath(unittest.TestCase):
     def test_preserve_luminance_in_gamut_and_projection(self):
@@ -200,16 +215,132 @@ class TestLuminancePreservationAndColorMath(unittest.TestCase):
         np.testing.assert_allclose(mapped[0], flog18, atol=1e-6)
 
 
+class TestArriStyle(unittest.TestCase):
+    def _make_achromatic_drt(self, path):
+        # 恒等测试表（输入输出同轴，使线性输入灰轴在 Gamma 2.4 解码后保持中性）
+        idx = np.linspace(0.0, 1.0, 9)
+        B, G, R = np.meshgrid(idx, idx, idx, indexing="ij")
+        tbl = np.stack([R, G, B], axis=-1)
+        m.write_cube(path, tbl, "MockDRT")
+
+    def test_logc4_look_chaining_and_luminance_preserve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drt = os.path.join(tmp, "drt.cube")
+            look = os.path.join(tmp, "look.cube")
+            out = os.path.join(tmp, "ARRI Mock Style.cube")
+            self._make_achromatic_drt(drt)
+
+            # Look 表给红色通道略微增暖、蓝色略微抑制
+            idx = np.linspace(0.0, 1.0, 9)
+            B, G, R = np.meshgrid(idx, idx, idx, indexing="ij")
+            ltbl = np.stack([np.clip(R * 1.05, 0.0, 1.0), G, B * 0.92], axis=-1)
+            m.write_cube(look, ltbl, "WarmLook")
+
+            build_arri_style.build(
+                drt, out, gamut="ARRI Wide Gamut 4", log_name="ARRI LogC4",
+                look_path=look, n=9, display_mode="2.4",
+            )
+            sz, tbl, dmin, dmax, title = m.read_cube(out)
+            self.assertEqual(sz, 9)
+            self.assertEqual(title, "ARRI Mock Style")
+            np.testing.assert_allclose(dmin, 0.0, atol=1e-12)
+            np.testing.assert_allclose(dmax, 1.0, atol=1e-12)
+
+            b, g, r = np.meshgrid(idx, idx, idx, indexing="ij")
+            inp = np.stack([r, g, b], axis=-1).reshape(-1, 3)
+            y_in = m.decode_space(inp, "srgb") @ m.REC709_LUM
+            y_out = m.decode_space(tbl.reshape(-1, 3), "srgb") @ m.REC709_LUM
+            np.testing.assert_allclose(y_out, y_in, atol=1e-6)
+
+            # 中灰格点应当呈现暖调（R > B）
+            mid = tbl[4, 4, 4]
+            self.assertGreater(mid[0], mid[2])
+
+    def test_logc3_runs_without_nan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drt = os.path.join(tmp, "drt3.cube")
+            out = os.path.join(tmp, "ARRI LogC3 Mock Style.cube")
+            self._make_achromatic_drt(drt)
+            build_arri_style.build(
+                drt, out, gamut="ARRI Wide Gamut 3", log_name="ARRI LogC3",
+                n=9, display_mode="2.4",
+            )
+            _, tbl, _, _, _ = m.read_cube(out)
+            self.assertTrue(np.all(np.isfinite(tbl)))
+            self.assertGreaterEqual(tbl.min(), 0.0)
+            self.assertLessEqual(tbl.max(), 1.0)
+
+    def test_missing_source_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = build_arri_style.main(["-i", tmp, "-o", tmp])
+            self.assertNotEqual(rc, 0)
+
+
+class TestFilmAndVeniceStyle(unittest.TestCase):
+    def test_venice_main_converts_and_preserves_luminance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir = os.path.join(tmp, "src")
+            dst_dir = os.path.join(tmp, "dst")
+            os.makedirs(src_dir)
+            src = os.path.join(src_dir, "Slog3-S-Gamut3.Cine_To_s709_V200.cube")
+            idx = np.linspace(0.0, 1.0, 9)
+            B, G, R = np.meshgrid(idx, idx, idx, indexing="ij")
+            tbl = np.stack([np.clip(R * 1.04, 0.0, 1.0), G, B * 0.94], axis=-1)
+            m.write_cube(src, tbl, "MockVENICE")
+
+            rc = build_film_style.main(["--venice-src", src_dir, "-o", dst_dir, "-n", "9"])
+            self.assertEqual(rc, 0)
+            out_path = os.path.join(dst_dir, "Sony VENICE s709 65 Style.cube")
+            self.assertTrue(os.path.isfile(out_path))
+
+            sz, res, _, _, title = m.read_cube(out_path)
+            self.assertEqual(sz, 9)
+            self.assertEqual(title, "Sony VENICE s709 65 Style")
+            b, g, r = np.meshgrid(idx, idx, idx, indexing="ij")
+            inp = np.stack([r, g, b], axis=-1).reshape(-1, 3)
+            y_in = m.decode_space(inp, "srgb") @ m.REC709_LUM
+            y_out = m.decode_space(res.reshape(-1, 3), "srgb") @ m.REC709_LUM
+            np.testing.assert_allclose(y_out, y_in, atol=1e-6)
+
+    def test_missing_sources_return_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = build_film_style.main(["--venice-src", tmp, "-o", tmp])
+            self.assertNotEqual(rc, 0)
+
+
 class TestGeneratedStyleOutputs(unittest.TestCase):
     def test_deployed_style_luts_valid_and_luminance_exact(self):
         outdir = os.path.join(ROOT, "output/acr_style")
         paths = sorted(glob.glob(os.path.join(outdir, "*.cube")))
-        self.assertEqual(len(paths), 21)
+
+        has_sony = os.path.isdir(os.path.join(ROOT, "sources/sony_luts"))
+        has_arri = os.path.isdir(os.path.join(ROOT, "sources/arri_official"))
+        has_venice = os.path.isdir(os.path.join(ROOT, "sources/sony_venice_official"))
+        expected = len(build_fuji_style.MAPPING)
+        if has_sony:
+            expected += 11
+        if has_arri:
+            expected += len(build_arri_style.ARRI_PRESETS)
+        if has_venice:
+            expected += len(build_film_style.VENICE_MAPPING)
+        self.assertEqual(len(paths), expected)
 
         names = {os.path.basename(p) for p in paths}
         self.assertNotIn("Fuji FLog2-709 65 Style.cube", names)
         self.assertNotIn("Fuji WDR 65 Style.cube", names)
+        self.assertFalse(any(n.startswith("FilmPrint ") for n in names))
+        self.assertFalse(any("Technicolor" in n for n in names))
+        self.assertFalse(any(n.startswith("Canon ") for n in names))
+        self.assertFalse(any("FairSkin" in n for n in names))
         self.assertEqual(len(build_fuji_style.MAPPING), 10)
+        self.assertEqual(len(build_arri_style.ARRI_PRESETS), 10)
+        self.assertEqual(len(build_film_style.VENICE_MAPPING), 3)
+        if has_arri:
+            for out_name, *_ in build_arri_style.ARRI_PRESETS:
+                self.assertIn(out_name, names)
+        if has_venice:
+            for out_name in build_film_style.VENICE_MAPPING.values():
+                self.assertIn(out_name, names)
 
         idx = np.linspace(0.0, 1.0, 64)
         B, G, R = np.meshgrid(idx, idx, idx, indexing="ij")

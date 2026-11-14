@@ -3,7 +3,7 @@
 包含两套面向 Sony 用户的 3D `.cube` LUT 转换工具（均基于四面体插值）：
 
 1. **F-Log2 → S-Log3 / S-Gamut3(.Cine)**（[`fuji_to_sony_lut.py`](fuji_to_sony_lut.py)）：将富士官方 F-Log2 胶片模拟 LUT 转为 Sony S-Log3 视频 LUT，供 DaVinci Resolve 与相机机内监看使用。
-2. **Camera Raw Style LUT**（[`lut_to_acr.py`](lut_to_acr.py) / [`build_fuji_style.py`](build_fuji_style.py)）：将 S-Log3 / F-Log2 视频 LUT 重烘为 Adobe Camera Raw（Apply LUT）可用的 **64³ 保亮度风格 LUT**——只保留色彩风格，维持 RAW 显影原有的明暗与对比。
+2. **Camera Raw Style LUT**（[`lut_to_acr.py`](lut_to_acr.py) / [`build_fuji_style.py`](build_fuji_style.py) / [`build_arri_style.py`](build_arri_style.py) / [`build_film_style.py`](build_film_style.py)）：将 S-Log3 / F-Log2 / ARRI LogC3 / LogC4 LUT 重烘为 Adobe Camera Raw（Apply LUT）可用的 **64³ 保亮度风格 LUT**——只保留色彩风格，维持 RAW 显影原有的明暗与对比。
 
 ## 安装依赖
 
@@ -40,15 +40,23 @@ uv sync
 
 ## 二、for Adobe Camera Raw Style（RAW 摄影工作流）
 
-链路：`ACR sRGB 输入 → 线性 → S-Log3/S-Gamut3.Cine 或 F-Log2/F-Gamut → 四面体采样 → 解码并替换为输入线性亮度（越界高饱和沿灰轴保亮度收缩）→ 编码回 sRGB 64³`
+链路：`ACR sRGB 输入 → 线性 → S-Log3/F-Log2/ARRI LogC3/LogC4 → 四面体采样（含可选 Look Library 串联）→ 解码并替换为输入线性亮度（越界高饱和沿灰轴保亮度收缩）→ 编码回 sRGB 64³`
 
 ```bash
 # 单个 S-Log3 LUT → ACR Style LUT
-python3 lut_to_acr.py --space srgb --tone preserve --size 64 \
+.venv/bin/python lut_to_acr.py --space srgb --tone preserve --size 64 \
     input.cube "output/acr_style/My Look Style.cube"
 
 # 批量构建富士官方 F-Log2 胶片模拟（自动跳过 FLog2-709 / WDR 技术曲线）
 .venv/bin/python build_fuji_style.py
+
+# 批量构建 ARRI 官方 LogC3/LogC4（REVEAL、Alexa Classic K1S1、ALF2 与 Look Library）
+# 源包可免费自 ARRI 技术下载页获取：https://www.arri.com/en/learn/camera-systems/technical-downloads
+.venv/bin/python build_arri_style.py
+
+# 批量构建 Sony VENICE 官方 Look（s709 / Look 7525 / Look 1）
+# Sony VENICE 官方源包：https://sony-cinematography.com/resources/luts/
+.venv/bin/python build_film_style.py
 
 # 一键全量重建并部署到 Camera Raw（支持 WSL/macOS 自动定位或手动传参）
 ./rebuild_all.sh
@@ -80,9 +88,11 @@ lut_convert/
 ├── fuji_to_sony_lut.py   # ① F-Log2 → S-Log3 / S-Gamut3(.Cine)（视频）
 ├── lut_to_acr.py         # ② S-Log3 → Adobe Camera Raw Style（RAW）
 ├── build_fuji_style.py   # ② 富士官方 F-Log2 → Camera Raw Style（RAW）
+├── build_arri_style.py   # ② ARRI 官方 LogC3/LogC4 → Camera Raw Style（RAW）
+├── build_film_style.py   # ② Sony VENICE Look → Camera Raw Style（RAW）
 ├── rebuild_all.sh        # ACR Style 一键清理与重建
 ├── redeploy_to_acr.sh    # 部署 .cube 到 Camera Raw 并清索引缓存
 ├── tests/                # 单元测试与输出校验
-├── sources/              # 源 LUT（含富士官方包）
+├── sources/              # 源 LUT（官方富士包 + 本地可选 ARRI/Sony 包）
 └── output/               # 生成结果（不纳入版本控制）
 ```

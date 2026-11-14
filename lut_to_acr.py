@@ -218,6 +218,11 @@ def read_cube(path):
                 domain_min = np.array([float(v) for v in line.split()[1:4]])
             elif key == "DOMAIN_MAX":
                 domain_max = np.array([float(v) for v in line.split()[1:4]])
+            elif key == "LUT_3D_INPUT_RANGE":
+                vals = line.split()[1:3]
+                if len(vals) == 2:
+                    domain_min = np.full(3, float(vals[0]))
+                    domain_max = np.full(3, float(vals[1]))
             elif key == "TITLE":
                 rest = line[len("TITLE"):].strip().strip('"')
                 if rest:
