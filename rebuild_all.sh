@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# 从 sources/ 重新生成全部 Style LUT（64³、四面体插值、8 位小数）。
+# 从 sources/ 重新生成全部 Style LUT（64³、四面体插值、8 位小数）：
 #   Arri/Film（S-Log3 路径）→ output/acr_style/
 #   Sony 技术转换 LUT       → output/not_deployed/sony/
-#   Fuji（官方 F-Log2 包）  → output/acr_style/（由 build_fuji_style.py 处理）
-#   ARRI（官方 LogC3/LogC4）→ output/acr_style/（由 build_arri_style.py 处理）
-#   Sony VENICE             → output/acr_style/（由 build_film_style.py 处理）
+#   Fuji（官方 F-Log2 包）  → output/acr_style/（build_fuji_style.py）
+#   ARRI（官方 LogC3/LogC4）→ output/acr_style/（build_arri_style.py）
+#   Sony VENICE             → output/acr_style/（build_film_style.py）
+#   Sony26 精选胶片/风格包  → output/acr_style/（build_sony26_style.py）
+#   Ultimate 原创 OKLab 风格 → output/acr_style/（build_ultimate_style.py）
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +37,12 @@ fi
 if [ -d "sources/sony_venice_official" ]; then
   .venv/bin/python build_film_style.py
 fi
+
+if [ -d "sources/sony_pack_20260928" ]; then
+  .venv/bin/python build_sony26_style.py
+fi
+
+.venv/bin/python build_ultimate_style.py
 
 echo
 echo "完成。output/acr_style: $(find output/acr_style -name '*.cube' | wc -l) 个，" \

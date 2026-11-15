@@ -22,6 +22,7 @@ uv.lock
 # Large local source data (original LUTs; 官方 Fuji 包仍由 git 跟踪)
 sources/arri_official/
 sources/sony_luts/
+sources/sony_pack_20260928/
 sources/sony_venice_official/
 sources/unused_wdr_pre_luts/
 

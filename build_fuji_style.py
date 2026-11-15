@@ -22,8 +22,9 @@ import colour
 
 import lut_to_acr as m
 
-PACK = "sources/fuji_official/65Grid/F-Log2"
-OUTDIR = "output/acr_style"
+HERE = os.path.dirname(os.path.abspath(__file__))
+PACK = os.path.join(HERE, "sources", "fuji_official", "65Grid", "F-Log2")
+OUTDIR = os.path.join(HERE, "output", "acr_style")
 
 # 官方胶片模拟 LUT 文件 -> ACR 菜单名（排除 FLog2-709 / WDR 技术曲线）
 MAPPING = {
@@ -42,9 +43,7 @@ MAPPING = {
 
 def build(src, dst, n=64, display_mode="srgb"):
     _, table, dmin, dmax, _ = m.read_cube(src)
-    idx = np.linspace(0.0, 1.0, n)
-    B, G, R = np.meshgrid(idx, idx, idx, indexing="ij")
-    codes = np.stack([R, G, B], axis=-1).reshape(-1, 3)
+    codes = m.uniform_grid(n)
 
     lin_srgb = m.decode_space(codes, "srgb")
     lin_fgamut = colour.RGB_to_RGB(
@@ -70,17 +69,24 @@ def build(src, dst, n=64, display_mode="srgb"):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="从富士官方 F-Log2 LUT 包构建 ACR Style LUT")
+    ap.add_argument("-i", "--src", default=PACK,
+                    help="富士官方 F-Log2 源 LUT 目录（默认 ./sources/fuji_official/65Grid/F-Log2）")
+    ap.add_argument("-o", "--dst", default=OUTDIR,
+                    help="输出 ACR Style 目录（默认 ./output/acr_style）")
+    ap.add_argument("-n", "--size", type=int, default=64,
+                    help="输出 LUT 格点数（默认 64）")
     ap.add_argument("--display-gamma", choices=m.DISPLAY_MODES, default="srgb",
                     help="源 LUT 输出（Rec.709）的显示解码方式（默认 srgb）")
     args = ap.parse_args(argv)
 
-    os.makedirs(OUTDIR, exist_ok=True)
+    os.makedirs(args.dst, exist_ok=True)
     for src_name, dst_name in MAPPING.items():
-        src = os.path.join(PACK, src_name)
+        src = os.path.join(args.src, src_name)
         if not os.path.exists(src):
             raise SystemExit("missing: " + src)
-        build(src, os.path.join(OUTDIR, dst_name + ".cube"),
-              display_mode=args.display_gamma)
+        build(src, os.path.join(args.dst, dst_name + ".cube"),
+              n=args.size, display_mode=args.display_gamma)
+    return 0
 
 
 if __name__ == "__main__":

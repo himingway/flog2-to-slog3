@@ -14,6 +14,8 @@ import numpy as np
 import build_arri_style
 import build_film_style
 import build_fuji_style
+import build_sony26_style
+import build_ultimate_style
 import fuji_to_sony_lut
 import lut_to_acr as m
 
@@ -80,7 +82,6 @@ class TestTetrahedralAndCubeIO(unittest.TestCase):
         self.assertLess(diff.max(), 1e-8)
 
         # 轴置换对称性（RGB -> GBR）
-        table_perm = np.transpose(table, (0, 2, 1, 3))  # [B, G, R] -> swap G,R in table axes
         # 完整置换 [B,G,R] -> [R,B,G] 等效输入 (r,g,b) -> (g,b,r)
         perm_idx = [1, 2, 0]
         # 原 table 索引为 [b, g, r]，新表要求在 (r', g', b') = (g, b, r) 处取原 (r, g, b)
@@ -308,43 +309,149 @@ class TestFilmAndVeniceStyle(unittest.TestCase):
             self.assertNotEqual(rc, 0)
 
 
+class TestSony26PackStyle(unittest.TestCase):
+    def test_curated_build_adds_prefix_preserves_luminance_and_supports_ev_offset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir = os.path.join(tmp, "src")
+            dst_dir = os.path.join(tmp, "dst")
+            os.makedirs(src_dir)
+            idx = np.linspace(0.0, 1.0, 9)
+            B, G, R = np.meshgrid(idx, idx, idx, indexing="ij")
+            # 高暗区分色差异确保 ev_offset 会改变色相而亮度依然严格锁定
+            tbl = np.stack([
+                np.clip(R * (0.95 + 0.15 * B), 0.0, 1.0),
+                G,
+                np.clip(B * (0.9 + 0.1 * (1.0 - R)), 0.0, 1.0),
+            ], axis=-1)
+            for src_name, _, _ in build_sony26_style.CURATED_SPECS:
+                m.write_cube(os.path.join(src_dir, src_name), tbl, "MockSony26")
+
+            rc = build_sony26_style.main(["-i", src_dir, "-o", dst_dir, "-n", "9"])
+            self.assertEqual(rc, 0)
+
+            inp = np.stack([R, G, B], axis=-1).reshape(-1, 3)
+            y_in = m.decode_space(inp, "srgb") @ m.REC709_LUM
+
+            for _, label, _ in build_sony26_style.CURATED_SPECS:
+                expected_name = build_sony26_style.output_filename(label)
+                self.assertTrue(expected_name.startswith(build_sony26_style.PREFIX))
+                out_path = os.path.join(dst_dir, expected_name)
+                self.assertTrue(os.path.isfile(out_path))
+                sz, res, _, _, title = m.read_cube(out_path)
+                self.assertEqual(sz, 9)
+                self.assertEqual(title, os.path.splitext(expected_name)[0])
+                y_out = m.decode_space(res.reshape(-1, 3), "srgb") @ m.REC709_LUM
+                np.testing.assert_allclose(y_out, y_in, atol=1e-6)
+
+            # Quirky 使用 ev_offset=0.5，与 ev_offset=0.0 的同名源表应产生可测差异但同保亮度
+            ev0_out = os.path.join(tmp, "ev0.cube")
+            ev5_out = os.path.join(dst_dir, build_sony26_style.output_filename("Quirky Pro400H Style"))
+            m.convert(os.path.join(src_dir, "Quirky_33x.cube"), ev0_out,
+                      space="srgb", tone_mode="preserve", display_mode="srgb", out_size=9, ev_offset=0.0)
+            _, tbl0, *_ = m.read_cube(ev0_out)
+            _, tbl5, *_ = m.read_cube(ev5_out)
+            self.assertGreater(np.abs(tbl5 - tbl0).max(), 1e-3)
+
+    def test_missing_sources_return_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = build_sony26_style.main(["-i", tmp, "-o", tmp])
+            self.assertNotEqual(rc, 0)
+
+
+class TestUltimateStyle(unittest.TestCase):
+    def test_build_luminance_neutrality_and_monotonic_hues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = build_ultimate_style.main(["-o", tmp, "-n", "17"])
+            self.assertEqual(rc, 0)
+
+            inp = m.uniform_grid(17)
+            y_in = m.decode_space(inp, "srgb") @ m.REC709_LUM
+
+            hues = np.linspace(0.0, 2.0 * np.pi, 72, endpoint=False)
+            ring_lin = np.clip(0.22 + 0.14 * np.stack([
+                np.cos(hues),
+                np.cos(hues - 2.0 * np.pi / 3.0),
+                np.cos(hues + 2.0 * np.pi / 3.0),
+            ], axis=-1), 0.01, 0.98)
+            ring_in = m.encode_space(ring_lin, "srgb")
+
+            tables = {}
+            for out_name in build_ultimate_style.OUTPUT_NAMES:
+                out_path = os.path.join(tmp, out_name)
+                self.assertTrue(os.path.isfile(out_path))
+
+                sz, tbl, dmin, dmax, title = m.read_cube(out_path)
+                self.assertEqual(sz, 17)
+                self.assertEqual(title, os.path.splitext(out_name)[0])
+                np.testing.assert_allclose(dmin, 0.0, atol=1e-12)
+                np.testing.assert_allclose(dmax, 1.0, atol=1e-12)
+
+                y_out = m.decode_space(tbl.reshape(-1, 3), "srgb") @ m.REC709_LUM
+                np.testing.assert_allclose(y_out, y_in, atol=1e-6)
+
+                # 360° 色环无色相反转
+                ring_out = m.decode_space(m.sample_table_tetra(tbl, ring_in), "srgb")
+                ok_ring = build_ultimate_style._lin_to_oklab(ring_out)
+                ang = np.degrees(np.arctan2(ok_ring[:, 2], ok_ring[:, 1])) % 360.0
+                diffs = (np.roll(ang, -1) - ang + 180.0) % 360.0 - 180.0
+                self.assertTrue(np.all(diffs > 0.0))
+
+                if out_name == build_ultimate_style.OUTPUT_NAME:
+                    # CrystalFilm 中灰与高光灰必须保持纯中性无色罩
+                    neutrals = m.sample_table_tetra(tbl, np.array([[0.50, 0.50, 0.50], [0.85, 0.85, 0.85]]))
+                    self.assertLess(float(np.max(neutrals.max(axis=1) - neutrals.min(axis=1))), 1e-3)
+                else:
+                    # AnalogFilm 必须呈冷青暗部与暖象牙高光分离调性
+                    shadow_gray = m.sample_table_tetra(tbl, np.array([[0.10, 0.10, 0.10]]))[0]
+                    high_gray = m.sample_table_tetra(tbl, np.array([[0.85, 0.85, 0.85]]))[0]
+                    self.assertGreater(float(shadow_gray[2] - shadow_gray[0]), 0.008)
+                    self.assertGreater(float(high_gray[0] - high_gray[2]), 0.008)
+
+                tables[out_name] = tbl
+
+            self.assertGreater(
+                float(np.max(np.abs(tables[build_ultimate_style.OUTPUT_NAMES[1]] - tables[build_ultimate_style.OUTPUT_NAMES[0]]))),
+                0.02,
+            )
+
+
 class TestGeneratedStyleOutputs(unittest.TestCase):
     def test_deployed_style_luts_valid_and_luminance_exact(self):
         outdir = os.path.join(ROOT, "output/acr_style")
         paths = sorted(glob.glob(os.path.join(outdir, "*.cube")))
 
-        has_sony = os.path.isdir(os.path.join(ROOT, "sources/sony_luts"))
+        sony_dir = os.path.join(ROOT, "sources/sony_luts")
+        has_sony = os.path.isdir(sony_dir)
         has_arri = os.path.isdir(os.path.join(ROOT, "sources/arri_official"))
         has_venice = os.path.isdir(os.path.join(ROOT, "sources/sony_venice_official"))
-        expected = len(build_fuji_style.MAPPING)
+        has_sony26 = os.path.isdir(os.path.join(ROOT, "sources/sony_pack_20260928"))
+
+        expected_names = set(build_ultimate_style.OUTPUT_NAMES)
+        expected_names.update(f"{dst_name}.cube" for dst_name in build_fuji_style.MAPPING.values())
         if has_sony:
-            expected += 11
+            for p in glob.glob(os.path.join(sony_dir, "*.cube")):
+                stem = os.path.splitext(os.path.basename(p))[0]
+                if not stem.startswith(("Fuji ", "Sony ")):
+                    expected_names.add(f"{stem} Style.cube")
         if has_arri:
-            expected += len(build_arri_style.ARRI_PRESETS)
+            expected_names.update(out_name for out_name, *_ in build_arri_style.ARRI_PRESETS)
         if has_venice:
-            expected += len(build_film_style.VENICE_MAPPING)
-        self.assertEqual(len(paths), expected)
+            expected_names.update(build_film_style.VENICE_MAPPING.values())
+        if has_sony26:
+            expected_names.update(
+                build_sony26_style.output_filename(label)
+                for _, label, _ in build_sony26_style.CURATED_SPECS
+            )
 
         names = {os.path.basename(p) for p in paths}
+        self.assertEqual(len(paths), len(expected_names))
+        self.assertEqual(names, expected_names)
+
+        # 确认富士技术转换表（FLog2-709 / WDR）未被错误纳入 Style 输出
         self.assertNotIn("Fuji FLog2-709 65 Style.cube", names)
         self.assertNotIn("Fuji WDR 65 Style.cube", names)
-        self.assertFalse(any(n.startswith("FilmPrint ") for n in names))
-        self.assertFalse(any("Technicolor" in n for n in names))
-        self.assertFalse(any(n.startswith("Canon ") for n in names))
-        self.assertFalse(any("FairSkin" in n for n in names))
-        self.assertEqual(len(build_fuji_style.MAPPING), 10)
-        self.assertEqual(len(build_arri_style.ARRI_PRESETS), 10)
-        self.assertEqual(len(build_film_style.VENICE_MAPPING), 3)
-        if has_arri:
-            for out_name, *_ in build_arri_style.ARRI_PRESETS:
-                self.assertIn(out_name, names)
-        if has_venice:
-            for out_name in build_film_style.VENICE_MAPPING.values():
-                self.assertIn(out_name, names)
 
-        idx = np.linspace(0.0, 1.0, 64)
-        B, G, R = np.meshgrid(idx, idx, idx, indexing="ij")
-        inp = np.stack([R, G, B], axis=-1).reshape(-1, 3)
+        inp = m.uniform_grid(64)
         y_in = m.decode_space(inp, "srgb") @ m.REC709_LUM
 
         for path in paths:

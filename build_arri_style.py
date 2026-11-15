@@ -68,9 +68,7 @@ def build(drt_path, dst_path, gamut="ARRI Wide Gamut 4", log_name="ARRI LogC4",
     """将单个 ARRI DRT (与可选 log-to-log Look LUT) 烘焙为 ACR sRGB Style LUT。"""
     _, drt_table, drt_min, drt_max, _ = m.read_cube(drt_path)
 
-    idx = np.linspace(0.0, 1.0, n)
-    b_axis, g_axis, r_axis = np.meshgrid(idx, idx, idx, indexing="ij")
-    codes = np.stack([r_axis, g_axis, b_axis], axis=-1).reshape(-1, 3)
+    codes = m.uniform_grid(n)
 
     lin_srgb = m.decode_space(codes, "srgb")
     lin_awg = np.clip(

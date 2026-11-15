@@ -12,8 +12,8 @@ ACR 19 的 LUT 面板把常规 .cube 当作标准 sRGB/Rec.709 伽马空间的�
       -> 按目标空间解码为线性 RGB（默认 sRGB；可切 --space adobergb）
       -> 3x3 矩阵转换线性 RGB 到 S-Gamut3.Cine
       -> S-Log3 编码（Sony 官方曲线）
-      -> 三线性插值采样原始 LUT
-      -> 输出端（--output-mode）:
+      -> 四面体 / 三线性插值采样原始 LUT（默认四面体）
+      -> 输出端（--output-mode / --tone preserve）:
            as-is       (默认) 原 LUT 输出值直接作为目标空间编码值写出  -> sRGB -> sRGB
            display-709        原 LUT 输出按 Rec.709 显示解码，再转换/编码为目标空间
 
@@ -28,10 +28,7 @@ ACR 19 的 LUT 面板把常规 .cube 当作标准 sRGB/Rec.709 伽马空间的�
     Adobe RGB (1998) 规范: gamma 563/256, D65
 """
 
-from __future__ import annotations
-
 import argparse
-import math
 import os
 import sys
 
@@ -390,6 +387,14 @@ def write_cube(path, table, title, source_title=None,
 # 转换
 # ---------------------------------------------------------------------------
 
+def uniform_grid(out_size):
+    """生成 (out_size^3, 3) 的 [R, G, B] 均匀采样网格（按 .cube B/G/R 外到内序）。"""
+    n = int(out_size)
+    idx = np.linspace(0.0, 1.0, n)
+    blue_axis, green_axis, red_axis = np.meshgrid(idx, idx, idx, indexing="ij")
+    return np.stack((red_axis, green_axis, blue_axis), axis=-1).reshape(-1, 3)
+
+
 def highlight_expand(v, anchor=0.18, white_scene=4.0):
     """显示线性值的高光展开（锚定 18% 灰，显示白 -> white_scene 倍场景反射）。
 
@@ -408,7 +413,7 @@ def highlight_expand(v, anchor=0.18, white_scene=4.0):
 
 def convert(src_path, dst_path, space="srgb", output_mode="as-is", display_mode=None,
             out_size=64, report=False, he_white=0.0, he_anchor=0.18, tone_mode="lut",
-            interp="tetrahedral"):
+            interp="tetrahedral", ev_offset=0.0):
     if display_mode is None:
         display_mode = "srgb" if tone_mode == "preserve" else "2.4"
 
@@ -416,14 +421,15 @@ def convert(src_path, dst_path, space="srgb", output_mode="as-is", display_mode=
     m_target_to_sgc, m_709_to_target = conversion_matrices(space)
 
     n = int(out_size)
-    idx = np.linspace(0.0, 1.0, n)
-    blue_axis, green_axis, red_axis = np.meshgrid(idx, idx, idx, indexing="ij")
-    codes = np.stack((red_axis, green_axis, blue_axis), axis=-1).reshape(-1, 3)
+    codes = uniform_grid(n)
 
     lin_src = decode_space(codes, space)
+    lin_in = lin_src
     if he_white and he_white > he_anchor and not space.endswith("-linear"):
-        lin_src = highlight_expand(lin_src, anchor=he_anchor, white_scene=he_white)
-    lin_sgc = np.clip(lin_src @ m_target_to_sgc.T, 0.0, None)
+        lin_in = highlight_expand(lin_in, anchor=he_anchor, white_scene=he_white)
+    if ev_offset:
+        lin_in = lin_in * (2.0 ** float(ev_offset))
+    lin_sgc = np.clip(lin_in @ m_target_to_sgc.T, 0.0, None)
     slog = slog3_encode(lin_sgc)
 
     pos = (slog - domain_min) / (domain_max - domain_min)
@@ -505,6 +511,8 @@ def main(argv=None):
                     help="高光展开锚点（默认 0.18，即 18%% 灰保持不变）")
     ap.add_argument("--tone", choices=("lut", "preserve"), default="lut",
                     help="lut: 保留原 LUT 的影调（默认）；preserve: 只取颜色风格，亮度沿用输入照片")
+    ap.add_argument("--ev-offset", type=float, default=0.0,
+                    help="输入 S-Log3 查表前的曝光补偿 EV（如 ETTR LUT 的 +0.5）")
     ap.add_argument("--report", action="store_true", help="打印矩阵与探针值")
     args = ap.parse_args(argv)
 
@@ -514,7 +522,7 @@ def main(argv=None):
     convert(args.input, args.output, space=args.space, output_mode=args.output_mode,
             display_mode=args.display_gamma, out_size=args.size,
             report=args.report, he_white=args.he_white, he_anchor=args.he_anchor,
-            tone_mode=args.tone, interp=args.interp)
+            tone_mode=args.tone, interp=args.interp, ev_offset=args.ev_offset)
     print("OK: %s -> %s" % (args.input, args.output))
 
 
