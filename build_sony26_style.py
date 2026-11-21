@@ -3,7 +3,7 @@
 """从精选索尼终极调色包（S-Log3 / S-Gamut3.Cine）构建 ACR / LrC 用 Style LUT。
 
 所有输出统一添加 ``Sony26 `` 前缀，方便在 Lightroom Classic / Adobe Camera Raw
-LUT 下拉菜单中分组检索，同时严格保持输入线性亮度与光滑四面体采样。
+LUT 下拉菜单中分组检索，并在输出格点匹配输入相对线性 Y。
 
 用法: .venv/bin/python build_sony26_style.py
 """
@@ -17,6 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PACK = os.path.join(HERE, "sources", "sony_pack_20260928")
 OUTDIR = os.path.join(HERE, "output", "acr_style")
 PREFIX = "Sony26 "
+SOURCE_DISPLAY_GAMMA = {"Quirky_33x.cube": "2.4"}  # Filmbox LUT header
 
 # (源文件名, LrC/ACR 显示基础名, 输入 EV 偏移)
 CURATED_SPECS = [
@@ -42,7 +43,7 @@ CURATED_SPECS = [
     ("Neutral_Slog3.cube", "Neutral Clear Style", 0.0),
     ("Neutro_SLG3.cube", "Neutro Clean Style", 0.0),
     ("SLOG3_Portrait.cube", "Portrait Style", 0.0),
-    # Filmbox C-41 Pro 400H 内含 -0.814 EV 机内拉暗；+0.5 EV 使肤色与中灰落回理想工作点
+    # +0.5 EV is the selected creative offset for this Filmbox look.
     ("Quirky_33x.cube", "Quirky Pro400H Style", 0.5),
 ]
 
@@ -63,8 +64,8 @@ def main(argv=None):
                     help="输出 LUT 格点数（默认 64）")
     ap.add_argument("--prefix", default=PREFIX,
                     help="ACR/LrC 菜单名前缀（默认 'Sony26 '）")
-    ap.add_argument("--display-gamma", choices=m.DISPLAY_MODES, default="srgb",
-                    help="源 LUT 输出的显示解码方式（默认 srgb）")
+    ap.add_argument("--display-gamma", choices=m.DISPLAY_MODES, default=None,
+                    help="覆盖整包的源显示解码方式（默认 Quirky 2.4，其余按 sRGB 假定）")
     args = ap.parse_args(argv)
 
     jobs = []
@@ -73,15 +74,16 @@ def main(argv=None):
         if not os.path.isfile(src):
             print(f"error: 缺少源 LUT 文件: {src}", file=sys.stderr)
             return 1
-        jobs.append((src, os.path.join(args.dst, output_filename(label, args.prefix)), ev_offset))
+        display_mode = args.display_gamma or SOURCE_DISPLAY_GAMMA.get(src_name, "srgb")
+        jobs.append((src, os.path.join(args.dst, output_filename(label, args.prefix)), ev_offset, display_mode))
 
     os.makedirs(args.dst, exist_ok=True)
-    for src, dst, ev_offset in jobs:
+    for src, dst, ev_offset, display_mode in jobs:
         m.convert(
             src,
             dst,
             space="srgb",
-            display_mode=args.display_gamma,
+            display_mode=display_mode,
             out_size=args.size,
             tone_mode="preserve",
             ev_offset=ev_offset,

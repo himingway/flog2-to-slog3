@@ -5,7 +5,7 @@
 链路（每个输出格点）:
     ACR sRGB 码 -> 解码线性 -> 转为 F-Gamut 线性（Bradford）
     -> F-Log2 编码 -> 采样官方 F-Log2 LUT
-    -> 输出按显示伽马解码 -> 亮度替换为输入照片亮度（越界高饱和沿等亮度灰轴收缩）
+    -> 按富士监看基准 Gamma 2.2 解码 -> 彩色表匹配输入相对 Y，ACROS 保留灰度混合和影调
     -> 编码写出
 
 注：官方包中 FLog2_to_FLog2-709（F-Log2 -> F-Log2 技术色域转换）与
@@ -25,10 +25,12 @@ import lut_to_acr as m
 HERE = os.path.dirname(os.path.abspath(__file__))
 PACK = os.path.join(HERE, "sources", "fuji_official", "65Grid", "F-Log2")
 OUTDIR = os.path.join(HERE, "output", "acr_style")
+DISPLAY_GAMMA = "2.2"  # GFX ETERNA 55 White Paper v1.01, page 13
+ACROS_LUT = "FLog2_to_ACROS_65grid_V.1.00.cube"
 
 # 官方胶片模拟 LUT 文件 -> ACR 菜单名（排除 FLog2-709 / WDR 技术曲线）
 MAPPING = {
-    "FLog2_to_ACROS_65grid_V.1.00.cube": "Fuji ACROS 65 Style",
+    ACROS_LUT: "Fuji ACROS 65 Style",
     "FLog2_to_ASTIA_65grid_V.1.00.cube": "Fuji ASTIA 65 Style",
     "FLog2_to_CLASSIC-CHROME_65grid_V.1.00.cube": "Fuji Classic Chrome 65 Style",
     "FLog2_to_CLASSIC-Neg._65grid_V.1.00.cube": "Fuji Classic Neg 65 Style",
@@ -41,7 +43,7 @@ MAPPING = {
 }
 
 
-def build(src, dst, n=64, display_mode="srgb"):
+def build(src, dst, n=64, display_mode=DISPLAY_GAMMA):
     _, table, dmin, dmax, _ = m.read_cube(src)
     codes = m.uniform_grid(n)
 
@@ -52,16 +54,17 @@ def build(src, dst, n=64, display_mode="srgb"):
     pos = (flog2 - dmin) / (dmax - dmin)
     look = np.clip(m.sample_table_tetra(table, pos), 0.0, 1.0)
 
-    # 只保留颜色风格：亮度替换为输入照片亮度（越界高饱和沿灰轴保亮度收缩）
     lin_look = m.decode_display(look, display_mode)
-    out_lin = m.preserve_luminance(lin_srgb, lin_look)
+    monochrome = os.path.basename(src) == ACROS_LUT
+    out_lin = lin_look if monochrome else m.preserve_luminance(lin_srgb, lin_look)
     out_codes = m.encode_space(out_lin, "srgb").reshape(n, n, n, 3)
 
     title = os.path.splitext(os.path.basename(dst))[0]
     m.write_cube(
         dst, out_codes, title,
         source_title=os.path.basename(src),
-        note="Re-baked for Adobe Camera Raw (F-Log2/F-Gamut source LUT)",
+        note=f"F-Log2/F-Gamut to sRGB, source display gamma {display_mode}, "
+             f"{'original monochrome tone' if monochrome else 'relative Y at nodes'}",
     )
     print("built", dst)
 
@@ -75,8 +78,8 @@ def main(argv=None):
                     help="输出 ACR Style 目录（默认 ./output/acr_style）")
     ap.add_argument("-n", "--size", type=int, default=64,
                     help="输出 LUT 格点数（默认 64）")
-    ap.add_argument("--display-gamma", choices=m.DISPLAY_MODES, default="srgb",
-                    help="源 LUT 输出（Rec.709）的显示解码方式（默认 srgb）")
+    ap.add_argument("--display-gamma", choices=m.DISPLAY_MODES, default=DISPLAY_GAMMA,
+                    help="源 LUT 的显示解码方式（富士监看基准为 Gamma 2.2）")
     args = ap.parse_args(argv)
 
     os.makedirs(args.dst, exist_ok=True)

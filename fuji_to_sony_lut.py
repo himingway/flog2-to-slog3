@@ -8,6 +8,8 @@ import numpy as np
 import colour
 from colour.algebra import table_interpolation_tetrahedral
 
+from color_math import compress_rgb_to_domain
+
 # ---------------------------------------------------------
 # 1. 日志系统配置 (工业级日志监控)
 # ---------------------------------------------------------
@@ -39,8 +41,11 @@ def map_slog3_samples_to_flog2(
         linear_slog3, cs_slog3, cs_flog2, chromatic_adaptation_transform='Bradford'
     )
 
-    # 不截断负值：F-Log2 编码底层在暗部有合法的线性延拓段，
-    # 可以妥善处理色域转换中出现的微小负值。强行截断会导致色相严重偏转。
+    # Use the actual LUT boundaries in linear light, including the negative
+    # F-Log2 toe. Compress saturated colors toward neutral before encoding.
+    domain_min, domain_max = np.asarray(domain, dtype=float)
+    low, high = colour.models.log_decoding(np.array([domain_min, domain_max]), 'F-Log2')
+    linear_flog2 = compress_rgb_to_domain(linear_flog2, cs_flog2.matrix_RGB_to_XYZ[1], low, high)
     # ``colour`` evaluates both branches of F-Log2's piecewise function via
     # ``np.where``.  The logarithmic branch is undefined for some negative
     # out-of-gamut values even though those samples correctly use the linear
@@ -49,11 +54,7 @@ def map_slog3_samples_to_flog2(
     with np.errstate(divide="ignore", invalid="ignore"):
         flog2_coords = colour.models.log_encoding(linear_flog2, 'F-Log2')
 
-    # 获取原始 LUT 域范围
-    domain_min = np.asarray(domain[0], dtype=float)
-    domain_max = np.asarray(domain[1], dtype=float)
-
-    # 仅在最终坐标级进行限制，防止超出 3D 网格索引范围
+    # Allow for roundoff at the boundary.
     return np.clip(flog2_coords, domain_min, domain_max)
 
 
@@ -110,7 +111,7 @@ def output_path_for(
         )
     output_path = output_root / output_rel_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    new_name = cube_name.replace("FLog2", "SLog3").replace(
+    new_name = cube_name.replace("FLog2", "SLog3", 1).replace(
         f"_{source_grid_size}grid_", f"_{output_grid_size}grid_"
     )
     return output_path.with_name(new_name)
@@ -204,7 +205,8 @@ def process_lut_directory(input_dir: str,
                 domain=np.array([[0, 0, 0], [1, 1, 1]]),
                 comments=[
                     "Input: Sony S-Log3 / " + input_colourspace,
-                    "Output: Fujifilm F-Log2 / F-Gamut LUT converted for DaVinci Resolve",
+                    "Output: same color encoding as the original Fujifilm LUT",
+                    "F-Gamut input uses a soft constant-Y compression near the source LUT boundary",
                     "Interpolation: tetrahedral",
                 ],
             )
@@ -241,7 +243,7 @@ def main():
                         choices=("S-Gamut3.Cine", "S-Gamut3"),
                         help="Sony S-Log3 素材配套的输入色域 (默认: S-Gamut3.Cine)")
     parser.add_argument("--output-grid-size", type=int, default=None,
-                        choices=(33, 65, 129),
+                        choices=(17, 33, 65, 129),
                         help="输出 LUT 网格精度 (默认: auto)")
 
     args = parser.parse_args()

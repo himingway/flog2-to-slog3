@@ -4,6 +4,7 @@
 
 import glob
 import os
+from pathlib import Path
 import tempfile
 import unittest
 
@@ -152,15 +153,12 @@ class TestLuminancePreservationAndColorMath(unittest.TestCase):
         y_out = out @ m.REC709_LUM
         np.testing.assert_allclose(y_out, y_in, atol=1e-13)
 
-        # 验证高饱和溢出色（索引 2）严格沿等亮度灰轴内缩，色相向量方向不变
-        w2 = np.full(3, y_in[2])
-        scaled2 = lin_look[2] * (y_in[2] / (lin_look[2] @ m.REC709_LUM))
-        d_expected = scaled2 - w2
-        d_actual = out[2] - w2
-        ratio = d_actual / d_expected
-        np.testing.assert_allclose(ratio, ratio[0], atol=1e-12)
-        self.assertGreater(ratio[0], 0.0)
-        self.assertLess(ratio[0], 1.0)
+        # The projection reduces chroma while preserving the source OKLab hue.
+        scaled = lin_look[2] * (y_in[2] / (lin_look[2] @ m.REC709_LUM))
+        a = m.linear_srgb_to_oklab(scaled)[1:]
+        b = m.linear_srgb_to_oklab(out[2])[1:]
+        np.testing.assert_allclose(b / np.linalg.norm(b), a / np.linalg.norm(a), atol=1e-10)
+        self.assertLess(np.linalg.norm(b), np.linalg.norm(a))
 
         # 验证被压黑的点（索引 4）回退为同亮度中性灰，不塌陷为 0
         np.testing.assert_allclose(out[4], np.full(3, y_in[4]), atol=1e-15)
@@ -168,12 +166,10 @@ class TestLuminancePreservationAndColorMath(unittest.TestCase):
         np.testing.assert_allclose(out[6], np.zeros(3), atol=1e-15)
 
     def test_slog3_and_matrix_match_colour_science(self):
-        lin = np.linspace(0.0, 2.0, 200)
-        np.testing.assert_allclose(
-            m.slog3_encode(lin),
-            colour.models.log_encoding(lin, "S-Log3"),
-            atol=1e-12,
-        )
+        lin = np.linspace(-0.01, 2.0, 200)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sony_reference = colour.models.log_encoding(lin, "S-Log3")
+        np.testing.assert_allclose(m.slog3_encode(lin), sony_reference, atol=1e-12)
         np.testing.assert_allclose(
             m.slog3_decode(m.slog3_encode(lin)), lin, atol=1e-12
         )
@@ -214,6 +210,83 @@ class TestLuminancePreservationAndColorMath(unittest.TestCase):
             domain,
         )
         np.testing.assert_allclose(mapped[0], flog18, atol=1e-6)
+
+    def test_flog2_gamut_mapping_preserves_y_and_saturates_gradually(self):
+        space = "S-Gamut3.Cine"
+        sony = np.array([[0.0, 0.18, 1.0], [0.0, 0.18, 1.01]])
+        f_gamut = colour.RGB_COLOURSPACES["F-Gamut"]
+        lum = f_gamut.matrix_RGB_to_XYZ[1]
+        raw = colour.RGB_to_RGB(sony, space, f_gamut)
+        domain = np.array([[0.0] * 3, [1.0] * 3])
+        self.assertTrue(np.all(raw[:, 0] < colour.models.log_decoding(0.0, "F-Log2")))
+        mapped = fuji_to_sony_lut.map_slog3_samples_to_flog2(m.slog3_encode(sony), space, domain)
+        self.assertTrue(np.all((mapped > 0.0) & (mapped < 1.0)))
+        mapped_lin = colour.models.log_decoding(mapped, "F-Log2")
+        y = raw @ lum
+        np.testing.assert_allclose(mapped_lin @ lum, y, atol=1e-9)
+        direction = (mapped_lin - y[:, None]) / (raw - y[:, None])
+        np.testing.assert_allclose(direction, np.repeat(direction[:, :1], 3, axis=1), atol=1e-9)
+        self.assertTrue(np.all(np.abs(np.diff(mapped, axis=0)) < 0.01))
+
+    def test_video_output_name_retains_original_technical_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = fuji_to_sony_lut.output_path_for(
+                Path(tmp), Path("65Grid/F-Log2/FLog2_to_FLog2-709_65grid_V.1.00.cube"),
+                "FLog2_to_FLog2-709_65grid_V.1.00.cube", 65, 17,
+            )
+            self.assertEqual(path.name, "SLog3_to_FLog2-709_17grid_V.1.00.cube")
+
+    def test_preserve_luminance_fades_near_black_and_handles_prophoto(self):
+        dark = np.array([[1e-6 / m.REC709_LUM[0] * scale, 0.0, 0.0]
+                         for scale in (0.999999, 1.000001)])
+        lin_in = np.full((2, 3), 0.5)
+        after = m.preserve_luminance(lin_in, dark)
+        np.testing.assert_allclose(after[0], after[1], atol=1e-6)
+
+        lum = m.space_lum_coef("prophoto")
+        _, from_srgb = m.conversion_matrices("prophoto")
+        to_srgb = np.linalg.inv(from_srgb)
+        lin_look = np.array([[0.02, 0.95, 0.98]])
+        after = m.preserve_luminance(np.full((1, 3), 0.9), lin_look, lum, space="prophoto")
+        self.assertTrue(np.all((after >= 0.0) & (after <= 1.0)))
+        np.testing.assert_allclose(after @ lum, 0.9, atol=1e-12)
+        chroma = m.linear_srgb_to_oklab(np.vstack((lin_look, after)) @ to_srgb.T)[:, 1:]
+        directions = chroma / np.linalg.norm(chroma, axis=1, keepdims=True)
+        np.testing.assert_allclose(directions[0], directions[1], atol=1e-10)
+        codes = np.array([0.01, 0.03125, 0.5, 1.0])
+        np.testing.assert_allclose(m.decode_space(codes, "prophoto"), [0.000625, 1 / 512, 0.5 ** 1.8, 1.0])
+        np.testing.assert_allclose(m.encode_space(m.decode_space(codes, "prophoto"), "prophoto"), codes)
+
+
+class TestFujiStyle(unittest.TestCase):
+    def test_acros_keeps_source_monochrome_mapping(self):
+        src = os.path.join(build_fuji_style.PACK, build_fuji_style.ACROS_LUT)
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = os.path.join(tmp, "ACROS.cube")
+            build_fuji_style.build(src, dst, n=17)
+            _, actual, *_ = m.read_cube(dst)
+        lin = m.decode_space(m.uniform_grid(17), "srgb")
+        log = colour.models.log_encoding(colour.RGB_to_RGB(lin, "sRGB", "F-Gamut"), "F-Log2")
+        _, table, low, high, _ = m.read_cube(src)
+        source = m.sample_table_tetra(table, (log - low) / (high - low))
+        expected = m.encode_space(np.clip(source, 0.0, 1.0) ** 2.2, "srgb")
+        np.testing.assert_allclose(actual.reshape(-1, 3), expected, atol=5.1e-9, rtol=0)
+        self.assertGreater(np.max(np.abs(expected[:, 0] - m.encode_space(lin @ m.REC709_LUM, "srgb"))), 0.01)
+
+    def test_velvia_luminance_between_nodes(self):
+        src = os.path.join(build_fuji_style.PACK, "FLog2_to_Velvia_65grid_V.1.00.cube")
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = os.path.join(tmp, "Velvia.cube")
+            build_fuji_style.build(src, dst)
+            _, table, *_ = m.read_cube(dst)
+        samples = np.vstack((np.random.default_rng(20261121).random((20_000, 3)),
+                             [0.99306172, 0.99324772, 0.01137865]))
+        expected = m.decode_space(samples, "srgb") @ m.REC709_LUM
+        for sample in (m.sample_table_tetra, m.sample_table):
+            actual = m.decode_space(sample(table, samples), "srgb") @ m.REC709_LUM
+            err = np.abs(actual - expected)
+            self.assertLess(np.quantile(err, 0.95), 1e-4)
+            self.assertLess(err.max(), 0.006)
 
 
 class TestArriStyle(unittest.TestCase):
@@ -345,11 +418,15 @@ class TestSony26PackStyle(unittest.TestCase):
 
             # Quirky 使用 ev_offset=0.5，与 ev_offset=0.0 的同名源表应产生可测差异但同保亮度
             ev0_out = os.path.join(tmp, "ev0.cube")
+            reference = os.path.join(tmp, "ev5-gamma24.cube")
             ev5_out = os.path.join(dst_dir, build_sony26_style.output_filename("Quirky Pro400H Style"))
-            m.convert(os.path.join(src_dir, "Quirky_33x.cube"), ev0_out,
-                      space="srgb", tone_mode="preserve", display_mode="srgb", out_size=9, ev_offset=0.0)
+            quirky = os.path.join(src_dir, "Quirky_33x.cube")
+            m.convert(quirky, ev0_out, tone_mode="preserve", display_mode="2.4", out_size=9)
+            m.convert(quirky, reference, tone_mode="preserve", display_mode="2.4", out_size=9, ev_offset=0.5)
             _, tbl0, *_ = m.read_cube(ev0_out)
             _, tbl5, *_ = m.read_cube(ev5_out)
+            _, expected, *_ = m.read_cube(reference)
+            np.testing.assert_array_equal(tbl5, expected)
             self.assertGreater(np.abs(tbl5 - tbl0).max(), 1e-3)
 
     def test_missing_sources_return_nonzero(self):
@@ -359,6 +436,23 @@ class TestSony26PackStyle(unittest.TestCase):
 
 
 class TestUltimateStyle(unittest.TestCase):
+    def test_analog_film_dark_hue_ring(self):
+        hue = np.deg2rad(np.arange(0.0, 360.0, 0.25))
+        ring = np.column_stack((np.full_like(hue, 0.24), 0.04 * np.cos(hue), 0.04 * np.sin(hue)))
+        rgb = build_ultimate_style._oklab_to_lin(ring)
+        recipe = build_ultimate_style.ANALOG_FILM_RECIPE
+        direct = build_ultimate_style.grade_linear_srgb(rgb, recipe)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "AnalogFilm.cube")
+            build_ultimate_style.build(path, recipe=recipe)
+            _, table, *_ = m.read_cube(path)
+        sampled = m.decode_space(m.sample_table_tetra(table, m.encode_space(rgb, "srgb")), "srgb")
+        for out in (direct, sampled):
+            lab = build_ultimate_style._lin_to_oklab(out)
+            angle = np.degrees(np.arctan2(lab[:, 2], lab[:, 1]))
+            steps = (np.roll(angle, -1) - angle + 180.0) % 360.0 - 180.0
+            self.assertTrue(np.all(steps > 0))
+
     def test_build_luminance_neutrality_and_monotonic_hues(self):
         with tempfile.TemporaryDirectory() as tmp:
             rc = build_ultimate_style.main(["-o", tmp, "-n", "17"])
@@ -416,8 +510,10 @@ class TestUltimateStyle(unittest.TestCase):
 
 
 class TestGeneratedStyleOutputs(unittest.TestCase):
-    def test_deployed_style_luts_valid_and_luminance_exact(self):
+    def test_generated_styles_are_valid_and_match_their_tone_modes(self):
         outdir = os.path.join(ROOT, "output/acr_style")
+        if not os.path.isdir(outdir):
+            self.skipTest("run rebuild_all.sh to generate the full style package")
         paths = sorted(glob.glob(os.path.join(outdir, "*.cube")))
 
         sony_dir = os.path.join(ROOT, "sources/sony_luts")
@@ -463,6 +559,9 @@ class TestGeneratedStyleOutputs(unittest.TestCase):
             self.assertGreaterEqual(tbl.min(), 0.0)
             self.assertLessEqual(tbl.max(), 1.0)
 
+            if title == build_fuji_style.MAPPING[build_fuji_style.ACROS_LUT]:
+                self.assertEqual(float(np.ptp(tbl, axis=-1).max()), 0.0)
+                continue
             y_out = m.decode_space(tbl.reshape(-1, 3), "srgb") @ m.REC709_LUM
             max_y_err = np.abs(y_out - y_in).max()
             self.assertLess(

@@ -8,7 +8,7 @@
   4. 可选串联 ARRI Look Library (log-to-log 3D LUT)
   5. 四面体插值采样 ARRI 官方 Rec.709 Gamma 2.4 DRT
   6. 按 Gamma 2.4 (ARRI 官方标注输出曲线) 解码为线性光
-  7. `preserve_luminance` 保留 ACR 输入亮度并沿等亮度灰轴收缩越界饱和色
+  7. `preserve_luminance` 匹配输入的相对线性 Y，并在固定 OKLab 色相下收缩越界颜色
   8. 编码回 sRGB 并写出 64^3 .cube
 """
 

@@ -4,8 +4,8 @@
 lut_to_acr.py — 把 S-Gamut3.Cine / S-Log3 的 .cube LUT 重制为
 Adobe Camera Raw 可直接使用的 LUT。
 
-ACR 19 的 LUT 面板把常规 .cube 当作标准 sRGB/Rec.709 伽马空间的创意 LUT，
-且不会自动做 Log 空间转换，因此默认按 sRGB 接口重建（--space srgb）。
+默认以 sRGB 为目标接口（--space srgb）。这是对宿主接口的假设，
+与源 LUT 的显示传递函数独立。
 
 色彩模型（每个输出格点）:
     ACR 输入 code
@@ -34,6 +34,8 @@ import sys
 
 import numpy as np
 
+from color_math import linear_srgb_to_oklab, oklab_to_linear_srgb
+
 # ---------------------------------------------------------------------------
 # 色彩空间定义
 # ---------------------------------------------------------------------------
@@ -54,6 +56,7 @@ BRADFORD_D65_TO_D50 = np.array([
 # Adobe RGB (1998)
 ADOBE_RGB_GAMMA = 563.0 / 256.0  # 2.19921875
 ADOBE_RGB_PRIMARIES = ((0.6400, 0.3300), (0.2100, 0.7100), (0.1500, 0.0600))
+ROMM_LIN_BREAK = 1.0 / 512.0
 
 # sRGB / Rec.709 基色
 SRGB_PRIMARIES = ((0.6400, 0.3300), (0.3000, 0.6000), (0.1500, 0.0600))
@@ -118,7 +121,7 @@ def conversion_matrices(space):
 
 def slog3_encode(linear):
     """场景线性 -> S-Log3 code (0..1)，Sony 官方分段公式。"""
-    x = np.clip(np.asarray(linear, dtype=np.float64), 0.0, None)
+    x = np.asarray(linear, dtype=np.float64)
     out = np.empty_like(x)
     hi = x >= SLOG3_LIN_BREAK
     out[hi] = (SLOG3_MID_CV
@@ -145,6 +148,8 @@ def decode_space(code, space):
         return v
     if space == "adobergb":
         return v ** ADOBE_RGB_GAMMA
+    if space == "prophoto":
+        return np.where(v < 16.0 * ROMM_LIN_BREAK, v / 16.0, v ** 1.8)
     # sRGB (IEC 61966-2-1)
     return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
 
@@ -156,6 +161,8 @@ def encode_space(linear, space):
         return v
     if space == "adobergb":
         return v ** (1.0 / ADOBE_RGB_GAMMA)
+    if space == "prophoto":
+        return np.where(v < ROMM_LIN_BREAK, v * 16.0, v ** (1.0 / 1.8))
     return np.where(v <= 0.0031308,
                     v * 12.92,
                     1.055 * v ** (1.0 / 2.4) - 0.055)
@@ -323,44 +330,56 @@ def sample_table_tetra(table, coords):
     return out
 
 
-def preserve_luminance(lin_in, lin_look, lum_coef=REC709_LUM):
-    """保持输入线性亮度并将越界高饱和色沿等亮度灰轴内缩至 [0, 1]^3。
-
-    先按 y_in / y_look 缩放 lin_look（若源 LUT 压黑至 y_look <= 1e-6，则回退到
-    同亮度的中性灰 w=(y_in, y_in, y_in)）；随后若任一通道超出 [0, 1]，沿连接
-    w 与目标色的等亮度线段缩回合法色域边界，严格保持线性亮度与色相方向，
-    避免逐通道 np.clip 造成的色相偏移与亮度跌落。
-    """
+def preserve_luminance(lin_in, lin_look, lum_coef=REC709_LUM, *, space="srgb"):
+    """Restore linear Y and reduce out-of-gamut chroma at constant OKLab hue."""
     lin_in = np.asarray(lin_in, dtype=np.float64)
     lin_look = np.asarray(lin_look, dtype=np.float64)
     lum_coef = np.asarray(lum_coef, dtype=np.float64)
 
     y_in = np.clip(lin_in @ lum_coef, 0.0, 1.0)
     y_look = lin_look @ lum_coef
-    w = y_in[:, None]
-
-    valid = y_look > 1e-6
-    out = np.broadcast_to(w, lin_look.shape).copy()
-    out[valid] = lin_look[valid] * (y_in[valid, None] / y_look[valid, None])
-
-    oob = np.any((out < 0.0) | (out > 1.0), axis=1)
+    neutral = y_in[:, None]
+    # Fade toward neutral as source luminance approaches zero, where chromaticity
+    # becomes ill-conditioned. This also handles source LUTs that crush to black.
+    t = np.clip(y_look / 1e-5, 0.0, 1.0)
+    strength = t * t * (3.0 - 2.0 * t)
+    scale = np.divide(y_in * strength, y_look, out=np.zeros_like(y_in), where=y_look > 0.0)
+    out = lin_look * scale[:, None] + neutral * (1.0 - strength[:, None])
+    interior = (y_in > 0.0) & (y_in < 1.0)
+    oob = interior & np.any((out < -1e-12) | (out > 1.0 + 1e-12), axis=1)
     if np.any(oob):
-        w_o = w[oob]
-        s_o = out[oob]
-        d_o = s_o - w_o
-        over = s_o > 1.0
-        under = s_o < 0.0
-        alpha = np.ones((w_o.shape[0], 1), dtype=np.float64)
-        if np.any(over):
-            u = np.where(over, (1.0 - w_o) / np.where(over, d_o, 1.0), 1.0)
-            alpha = np.minimum(alpha, np.min(u, axis=1, keepdims=True))
-        if np.any(under):
-            l = np.where(under, w_o / np.where(under, -d_o, 1.0), 1.0)
-            alpha = np.minimum(alpha, np.min(l, axis=1, keepdims=True))
-        alpha = np.clip(alpha, 0.0, 1.0)
-        out[oob] = w_o + alpha * d_o
-
+        out[oob] = _fit_oklab_chroma(out[oob], y_in[oob], lum_coef, space)
+    out[~interior] = neutral[~interior]
     return np.clip(out, 0.0, 1.0)
+
+
+def _fit_oklab_chroma(rgb, y, lum_coef, space):
+    if space.startswith("srgb"):
+        to_srgb = from_srgb = np.eye(3)
+    else:
+        _, from_srgb = conversion_matrices(space)
+        to_srgb = np.linalg.inv(from_srgb)
+    lab = linear_srgb_to_oklab(rgb @ to_srgb.T)
+
+    # OKLab scales uniformly with the cube root of exposure. At each trial
+    # chroma we can restore Y by scaling RGB without changing OKLab hue.
+    low = np.zeros_like(y)
+    high = np.ones_like(y)
+    result = np.repeat(y[:, None], 3, axis=1)
+    trial = lab.copy()
+    for _ in range(20):
+        amount = (low + high) * 0.5
+        trial[:, 1:] = lab[:, 1:] * amount[:, None]
+        rgb_trial = oklab_to_linear_srgb(trial) @ from_srgb.T
+        trial_y = rgb_trial @ lum_coef
+        positive = trial_y > 0.0
+        scale = np.divide(y, trial_y, out=np.zeros_like(y), where=positive)
+        rgb_trial *= scale[:, None]
+        fits = positive & np.all((rgb_trial >= 0.0) & (rgb_trial <= 1.0), axis=1)
+        result[fits] = rgb_trial[fits]
+        low = np.where(fits, amount, low)
+        high = np.where(fits, high, amount)
+    return result
 
 
 def write_cube(path, table, title, source_title=None,
@@ -426,10 +445,13 @@ def convert(src_path, dst_path, space="srgb", output_mode="as-is", display_mode=
     lin_src = decode_space(codes, space)
     lin_in = lin_src
     if he_white and he_white > he_anchor and not space.endswith("-linear"):
-        lin_in = highlight_expand(lin_in, anchor=he_anchor, white_scene=he_white)
+        y = lin_in @ space_lum_coef(space)
+        expanded = highlight_expand(y, anchor=he_anchor, white_scene=he_white)
+        scale = np.divide(expanded, y, out=np.ones_like(y), where=y > 0.0)
+        lin_in = lin_in * scale[:, None]
     if ev_offset:
         lin_in = lin_in * (2.0 ** float(ev_offset))
-    lin_sgc = np.clip(lin_in @ m_target_to_sgc.T, 0.0, None)
+    lin_sgc = lin_in @ m_target_to_sgc.T
     slog = slog3_encode(lin_sgc)
 
     pos = (slog - domain_min) / (domain_max - domain_min)
@@ -437,11 +459,9 @@ def convert(src_path, dst_path, space="srgb", output_mode="as-is", display_mode=
     look = np.clip(sampler(table, pos), 0.0, 1.0)
 
     if tone_mode == "preserve":
-        # 只保留 LUT 的颜色风格：把 LUT 输出的亮度替换成输入照片自身的亮度，
-        # 对超出色域立方体的高饱和色沿等亮度灰轴收缩。
         lin_look_709 = decode_display(look, display_mode)
         lin_look = lin_look_709 if space.startswith("srgb") else (lin_look_709 @ m_709_to_target.T)
-        out_lin = preserve_luminance(lin_src, lin_look, lum_coef=space_lum_coef(space))
+        out_lin = preserve_luminance(lin_src, lin_look, space_lum_coef(space), space=space)
         out_codes = encode_space(out_lin, space)
     elif output_mode == "display-709":
         lin_709 = decode_display(look, display_mode)
@@ -454,11 +474,24 @@ def convert(src_path, dst_path, space="srgb", output_mode="as-is", display_mode=
     # Camera Raw 菜单显示的是 TITLE 字段，因此让 TITLE 与输出文件名一致
     display_title = os.path.splitext(os.path.basename(dst_path))[0]
     os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
-    write_cube(dst_path, out_table, display_title, source_title=title)
+    decode_source = tone_mode == "preserve" or output_mode == "display-709"
+    encoding = f"source display gamma {display_mode}" if decode_source else "source output codes used directly"
+    constraint = ", relative linear Y matched at nodes" if tone_mode == "preserve" else ""
+    write_cube(dst_path, out_table, display_title, source_title=title,
+               note=f"S-Log3/S-Gamut3.Cine source, target {space}, {encoding}{constraint}")
 
     if report:
         _print_report(table, domain_min, domain_max, m_target_to_sgc, m_709_to_target,
                       space, output_mode, display_mode, src_size, n)
+        if tone_mode == "preserve":
+            points = np.random.default_rng(20261121).random((20_000, 3))
+            lum = space_lum_coef(space)
+            expected = decode_space(points, space) @ lum
+            for name, sample in (("tetrahedral", sample_table_tetra), ("trilinear", sample_table)):
+                actual = decode_space(sample(out_table, points), space) @ lum
+                err = np.abs(actual - expected)
+                print(f"格点间相对 Y 误差 ({name}, 20000 点): P95 {np.quantile(err, 0.95):.6g}, "
+                      f"max {err.max():.6g}")
     return dst_path
 
 
@@ -467,6 +500,7 @@ def _print_report(table, domain_min, domain_max, m_target_to_sgc, m_709_to_targe
     np.set_printoptions(precision=7, suppress=True)
     gamma_name = {"adobergb": "2.19921875", "adobergb-linear": "1.0 (linear)",
                   "srgb": "sRGB", "srgb-linear": "1.0 (linear)",
+                  "prophoto": "1.8 (ROMM RGB / ProPhoto D50)",
                   "prophoto-linear": "1.0 (linear, ProPhoto/D50)",
                   "prophoto-gamma": "sRGB 曲线 (ProPhoto/D50)"}[space]
     print("目标空间: %s (gamma %s), 输出模式: %s, 显示解码: %s" % (
@@ -491,16 +525,15 @@ def main(argv=None):
     ap.add_argument("input", help="输入 .cube")
     ap.add_argument("output", help="输出 .cube")
     ap.add_argument("--space", choices=("srgb", "srgb-linear", "adobergb", "adobergb-linear",
-                                        "prophoto-gamma", "prophoto-linear"),
+                                        "prophoto", "prophoto-gamma", "prophoto-linear"),
                     default="srgb",
-                    help="Camera Raw 解释 LUT 所用的空间（默认 srgb，即 ACR 19 的常规 "
-                         "sRGB/Rec.709 伽马空间；可切 adobergb / adobergb-linear）")
+                    help="生成 LUT 时假定的输入与输出空间（默认 srgb）")
     ap.add_argument("--output-mode", choices=("as-is", "display-709"), default="as-is",
                     help="as-is: 原 LUT 输出值直接作为目标空间值（目标空间 -> 目标空间，默认）；"
                          "display-709: 原 LUT 输出按 Rec.709 显示解码后再换算")
     ap.add_argument("--display-gamma", choices=DISPLAY_MODES, default=None,
                     help="原始 LUT 输出（Rec.709）的显示解码方式："
-                         "preserve 模式默认 srgb，display-709 模式默认 2.4（BT.1886）")
+                         "preserve 模式默认 srgb，display-709 模式默认纯 Gamma 2.4")
     ap.add_argument("--size", type=int, default=64,
                     help="输出 LUT 格点数（默认 64 = Camera Raw 上限）")
     ap.add_argument("--interp", choices=("tetrahedral", "trilinear"), default="tetrahedral",
@@ -510,7 +543,7 @@ def main(argv=None):
     ap.add_argument("--he-anchor", type=float, default=0.18,
                     help="高光展开锚点（默认 0.18，即 18%% 灰保持不变）")
     ap.add_argument("--tone", choices=("lut", "preserve"), default="lut",
-                    help="lut: 保留原 LUT 的影调（默认）；preserve: 只取颜色风格，亮度沿用输入照片")
+                    help="lut: 沿用源 LUT 影调（默认）；preserve: 在输出格点匹配输入的相对线性 Y")
     ap.add_argument("--ev-offset", type=float, default=0.0,
                     help="输入 S-Log3 查表前的曝光补偿 EV（如 ETTR LUT 的 +0.5）")
     ap.add_argument("--report", action="store_true", help="打印矩阵与探针值")
